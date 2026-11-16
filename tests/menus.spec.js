@@ -7,7 +7,7 @@ test.beforeAll(async () => {
   helpers = result.outputFiles[0].text;
 });
 
-async function fixture(page, { delay = 0, closeOnEscape = true, stealFocus = false } = {}) {
+async function fixture(page, { delay = 0, closeOnEscape = true, stealFocus = false, loadDelay = 0 } = {}) {
   await page.setContent(`
     <button id="picker" aria-haspopup="menu" aria-label="Auto、モデル セレクター">Auto</button>
     <button id="ordinary">普通のボタン</button>
@@ -38,6 +38,13 @@ async function fixture(page, { delay = 0, closeOnEscape = true, stealFocus = fal
             }
           });
           document.body.append(menu);
+          if (${loadDelay}) {
+            menu.setAttribute('aria-busy', 'true');
+            setTimeout(() => {
+              menu.lastElementChild.textContent = 'Loaded model';
+              menu.setAttribute('aria-busy', 'false');
+            }, ${loadDelay});
+          }
           if (${stealFocus}) {
             // Typical menu libraries focus the first item, sometimes after an animation.
             menu.firstElementChild.focus();
@@ -153,6 +160,14 @@ test('real keyboard typing stays in the search input while menu scripts move foc
   await expect(input).toHaveValue('Think Deeper');
   await expect(input).toBeFocused();
   await expect(page.getByRole('option').first()).toContainText('Think Deeper');
+  await expect(page.locator('[role="menu"]')).toHaveCount(0);
+  expect(await page.evaluate(() => window.executions)).toBe(0);
+});
+
+test('fast discovery waits for menus that explicitly report asynchronous loading', async ({ page }) => {
+  await fixture(page, { loadDelay: 120 });
+  const names = await page.evaluate(async () => (await menuHelpers.discoverMenus()).map(({ name }) => name));
+  expect(names).toEqual(['Auto', 'Quick Response', 'Loaded model']);
   await expect(page.locator('[role="menu"]')).toHaveCount(0);
   expect(await page.evaluate(() => window.executions)).toBe(0);
 });

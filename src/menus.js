@@ -16,9 +16,9 @@ function menus(doc) {
   return allRoots(doc).flatMap((root) => [...root.querySelectorAll('[role="menu"]')]).filter(visible);
 }
 
-function linkedMenu(trigger, doc) {
+function linkedMenu(trigger, doc, available = menus(doc)) {
   const ids = (trigger.getAttribute('aria-controls') || '').split(/\s+/);
-  return menus(doc).find((menu) => menu.getRootNode() === trigger.getRootNode() &&
+  return available.find((menu) => menu.getRootNode() === trigger.getRootNode() &&
     ((menu.id && ids.includes(menu.id)) || (trigger.id &&
       (menu.getAttribute('aria-labelledby') || '').split(/\s+/).includes(trigger.id))));
 }
@@ -57,8 +57,9 @@ async function openMenu(trigger, doc, signal) {
   const before = new Set(menus(doc));
   trigger.click();
   const menu = await waitFor(() => {
-    const linked = linkedMenu(trigger, doc);
-    const added = menus(doc).filter((candidate) => !before.has(candidate));
+    const available = menus(doc);
+    const linked = linkedMenu(trigger, doc, available);
+    const added = available.filter((candidate) => !before.has(candidate));
     const found = linked || (added.length === 1 ? added[0] : null);
     return found?.querySelector(ITEM) ? found : null;
   }, signal);
@@ -71,6 +72,38 @@ async function openMenu(trigger, doc, signal) {
 
 function signature(element) {
   return JSON.stringify([element.getAttribute('role'), label(element), element.getAttribute('href') || '']);
+}
+
+function waitForMenuContents(menu, signal) {
+  // Collect once the menu itself stops changing, rather than delaying every
+  // menu by 100 ms. Respect explicit loading indicators for slower menus.
+  return new Promise((resolve) => {
+    let quietTimer, timeout, observer;
+    const finish = (ready) => {
+      clearTimeout(quietTimer);
+      clearTimeout(timeout);
+      observer?.disconnect();
+      signal?.removeEventListener('abort', abort);
+      resolve(ready);
+    };
+    const abort = () => finish(false);
+    const loading = () => Boolean(menu.closest('[aria-busy="true"]') || menu.querySelector('[aria-busy="true"]'));
+    const ready = () => !loading() && [...menu.querySelectorAll(ITEM)].some(visible);
+    const changed = () => {
+      clearTimeout(quietTimer);
+      quietTimer = setTimeout(() => {
+        if (ready()) finish(true);
+        else changed();
+      }, 24);
+    };
+    if (signal?.aborted) { finish(false); return; }
+    observer = new MutationObserver(changed);
+    observer.observe(menu, { subtree: true, childList: true, characterData: true, attributes: true,
+      attributeFilter: ['aria-busy', 'role', 'hidden', 'class', 'style'] });
+    signal?.addEventListener('abort', abort, { once: true });
+    timeout = setTimeout(() => finish(ready()), 800);
+    changed();
+  });
 }
 
 /** Explore only explicit top-level menu buttons; never activate an item during discovery. */
@@ -90,11 +123,9 @@ export async function discoverMenus({ doc = document, excludedHost, signal, onUp
     try {
       opened = await openMenu(trigger, doc, signal);
       if (!opened || signal?.aborted) continue;
-      // A short settling window covers asynchronous content and menu animations.
-      await waitFor(() => signal?.aborted, undefined, 100);
-      if (signal?.aborted) continue;
+      if (!await waitForMenuContents(opened.menu, signal) || signal?.aborted) continue;
       const { menu } = opened;
-      const candidates = collectCandidates(doc, excludedHost).filter(({ element }) => menu.contains(element) && element.closest('[role="menu"]') === menu);
+      const candidates = collectCandidates(menu, excludedHost).filter(({ element }) => element.closest('[role="menu"]') === menu);
       const occurrences = new Map();
       for (const candidate of candidates) {
         // Submenu triggers need a multi-step route; leave those to normal searching for now.
@@ -129,7 +160,7 @@ export async function resolveMenuCandidate(candidate) {
   const opened = await openMenu(trigger, doc);
   if (!opened) throw new Error('メニューを開けませんでした。開き直して検索してください。');
   const fresh = await waitFor(() => {
-    const matches = collectCandidates(doc).filter(({ element }) => opened.menu.contains(element) &&
+    const matches = collectCandidates(opened.menu).filter(({ element }) =>
       element.closest('[role="menu"]') === opened.menu && signature(element) === key);
     return matches[occurrence];
   });
