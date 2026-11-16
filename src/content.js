@@ -1,15 +1,18 @@
 import { collectCandidates, activateCandidate } from './candidates.js';
 import { createSearch } from './search.js';
+import { discoverMenus, resolveMenuCandidate, internalMenuEvent } from './menus.js';
 import styles from './panel.css';
 
-const INSTANCE = '__domseek_panel_v1__';
+const INSTANCE = '__domseek_panel_v2__';
 
 function createPanel() {
   let host, shadow, input, list, status, observer, previousFocus;
   let results = [], selected = 0, search, timer, busy = false, composing = false;
+  let discovered = [], scanController, scanTask = Promise.resolve(), scanningText = '';
   const isOpen = () => Boolean(host?.isConnected);
 
   function close(restoreFocus = true) {
+    scanController?.abort();
     observer?.disconnect();
     clearTimeout(timer);
     document.removeEventListener('keydown', onDocumentKey, true);
@@ -48,13 +51,16 @@ function createPanel() {
     });
     const retained = results.findIndex(({ element }) => element === oldElement);
     select(retained < 0 ? 0 : retained);
-    status.textContent = !input.value.trim() ? '検索ワードを入力してください' :
+    const message = !input.value.trim() ? '検索ワードを入力してください' :
       results.length ? `${results.length}件の候補` : '一致する操作がありません';
+    status.textContent = [message, scanningText].filter(Boolean).join(' · ');
   }
 
   function refresh() {
     if (!isOpen() || busy) return;
-    search = createSearch(collectCandidates(document, host));
+    const live = collectCandidates(document, host);
+    const cached = discovered.filter(({ menuRoute }) => menuRoute.trigger.isConnected);
+    search = createSearch([...live.filter(({ element }) => !cached.some((candidate) => candidate.element === element)), ...cached]);
     render();
   }
 
@@ -67,7 +73,9 @@ function createPanel() {
     input.disabled = true;
     status.textContent = '実行中…';
     try {
-      await activateCandidate(candidate);
+      scanController?.abort();
+      await scanTask;
+      await activateCandidate(candidate.menuRoute ? await resolveMenuCandidate(candidate) : candidate);
       close(false);
     } catch (error) {
       status.textContent = error.message;
@@ -80,6 +88,7 @@ function createPanel() {
   }
 
   function onDocumentKey(event) {
+    if (event[internalMenuEvent]) return;
     if (busy) { event.preventDefault(); event.stopImmediatePropagation(); return; }
     if (event.isComposing || composing || event.keyCode === 229) {
       event.stopImmediatePropagation();
@@ -100,6 +109,28 @@ function createPanel() {
     }
   }
 
+  function protectSearchFocus(signal) {
+    const searchInput = input;
+    const searchRoot = shadow;
+    const types = ['focus', 'focusin', 'blur', 'focusout'];
+    function guard(event) {
+      if (signal.aborted || !isOpen() || busy || !(event.target instanceof Node)) return;
+      // Menu libraries focus items on mount and focus their trigger on dismissal.
+      // Intercept before their focus traps, including blur handlers that would
+      // dismiss the menu when focus is returned to our input.
+      event.stopImmediatePropagation();
+      if ((event.type === 'focus' || event.type === 'focusin') && searchRoot.activeElement !== searchInput) {
+        searchInput.focus({ preventScroll: true });
+      }
+    }
+    const cleanup = () => {
+      for (const type of types) window.removeEventListener(type, guard, true);
+    };
+    for (const type of types) window.addEventListener(type, guard, true);
+    signal.addEventListener('abort', cleanup, { once: true });
+    return () => { cleanup(); signal.removeEventListener('abort', cleanup); };
+  }
+
   function observe() {
     const options = { subtree: true, childList: true, characterData: true, attributes: true,
       attributeFilter: ['class', 'style', 'hidden', 'inert', 'open', 'disabled', 'aria-disabled', 'aria-expanded', 'aria-controls', 'aria-label', 'aria-labelledby', 'role', 'href', 'title', 'onclick', 'value', 'alt', 'type'] };
@@ -116,6 +147,8 @@ function createPanel() {
     composing = false;
     results = [];
     selected = 0;
+    discovered = [];
+    scanningText = '';
     previousFocus = document.activeElement;
     while (previousFocus?.shadowRoot?.activeElement) previousFocus = previousFocus.shadowRoot.activeElement;
     host = document.createElement('div');
@@ -152,9 +185,27 @@ function createPanel() {
     observe();
     document.addEventListener('keydown', onDocumentKey, true);
     input.focus({ preventScroll: true });
+    const controller = new AbortController();
+    scanController = controller;
+    const releaseFocus = protectSearchFocus(controller.signal);
+    const current = () => scanController === controller && isOpen();
+    scanTask = discoverMenus({
+      excludedHost: host,
+      signal: controller.signal,
+      onUpdate(items) { if (current()) { discovered = items; refresh(); } },
+      onProgress(index, count, error) {
+        if (current()) { scanningText = error || `メニュー収集中 ${index}/${count}`; render(); }
+      },
+      restoreFocus() { if (current() && !busy) input.focus({ preventScroll: true }); },
+    }).then(() => {
+      if (current() && !busy) { scanningText = ''; refresh(); }
+    }).catch((error) => {
+      console.warn('DomSeek menu discovery stopped.', error);
+      if (current() && !busy) { scanningText = '一部のメニューを収集できませんでした'; refresh(); }
+    }).finally(releaseFocus);
   }
 
-  return { toggle() { if (busy) return; if (isOpen()) close(); else open(); } };
+  return { async toggle() { if (busy) return; if (isOpen()) close(); else { await scanTask; open(); } } };
 }
 
 globalThis[INSTANCE] ??= createPanel();

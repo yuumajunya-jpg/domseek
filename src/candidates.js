@@ -6,7 +6,7 @@ function ancestors(element) {
   return result;
 }
 
-function allRoots(root) {
+export function allRoots(root) {
   const roots = [root];
   for (const element of root.querySelectorAll('*')) {
     if (element.shadowRoot) roots.push(...allRoots(element.shadowRoot));
@@ -14,7 +14,7 @@ function allRoots(root) {
   return roots;
 }
 
-function label(element) {
+export function label(element) {
   const root = element.getRootNode();
   const labelled = (element.getAttribute('aria-labelledby') || '').split(/\s+/)
     .map((id) => root.getElementById?.(id)?.textContent || '').join(' ').trim();
@@ -23,7 +23,7 @@ function label(element) {
     element.getAttribute('alt')?.trim() || element.value?.trim() || element.title?.trim() || '';
 }
 
-function isDisabled(element) {
+export function isDisabled(element) {
   return element.matches(':disabled') || ancestors(element).some((node) => node.getAttribute('aria-disabled') === 'true');
 }
 
@@ -31,7 +31,7 @@ function firstSummary(details) {
   return [...details.children].find((child) => child.tagName === 'SUMMARY');
 }
 
-function isHiddenStyle(element) {
+export function isHiddenStyle(element) {
   const style = getComputedStyle(element);
   return element.hidden || style.display === 'none' || style.contentVisibility === 'hidden' || style.opacity === '0';
 }
@@ -40,7 +40,7 @@ export function collectCandidates(doc = document, excludedHost) {
   const result = [];
   for (const root of allRoots(doc)) {
     const controls = new Map();
-    for (const controller of root.querySelectorAll('[aria-controls], [aria-expanded][id]')) {
+    for (const controller of root.querySelectorAll('[aria-controls], [aria-expanded][id], [aria-haspopup][id]')) {
       if (excludedHost && ancestors(controller).includes(excludedHost)) continue;
       for (const id of (controller.getAttribute('aria-controls') || '').split(/\s+/)) {
         const panel = root.getElementById?.(id);
