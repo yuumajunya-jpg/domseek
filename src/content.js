@@ -9,6 +9,7 @@ function createPanel() {
   let host, shadow, input, list, status, observer, previousFocus;
   let results = [], selected = 0, search, timer, busy = false, composing = false;
   let discovered = [], scanController, scanTask = Promise.resolve(), scanningText = '';
+  let liveCandidates = [];
   const isOpen = () => Boolean(host?.isConnected);
 
   function close(restoreFocus = true) {
@@ -56,12 +57,19 @@ function createPanel() {
     status.textContent = [message, scanningText].filter(Boolean).join(' · ');
   }
 
+  function updateSearch() {
+    if (!isOpen() || busy) return;
+    const cached = discovered.filter(({ menuRoute }) => menuRoute.trigger.isConnected);
+    const cachedElements = new Set(cached.map(({ element }) => element));
+    const live = liveCandidates.filter(({ element }) => element.isConnected && !cachedElements.has(element));
+    search = createSearch([...live, ...cached]);
+    render();
+  }
+
   function refresh() {
     if (!isOpen() || busy) return;
-    const live = collectCandidates(document, host);
-    const cached = discovered.filter(({ menuRoute }) => menuRoute.trigger.isConnected);
-    search = createSearch([...live.filter(({ element }) => !cached.some((candidate) => candidate.element === element)), ...cached]);
-    render();
+    liveCandidates = collectCandidates(document, host);
+    updateSearch();
   }
 
   async function execute() {
@@ -192,7 +200,7 @@ function createPanel() {
     scanTask = discoverMenus({
       excludedHost: host,
       signal: controller.signal,
-      onUpdate(items) { if (current()) { discovered = items; refresh(); } },
+      onUpdate(items) { if (current()) { discovered = items; updateSearch(); } },
       onProgress(index, count, error) {
         if (current()) { scanningText = error || `メニュー収集中 ${index}/${count}`; render(); }
       },

@@ -23,15 +23,42 @@ function linkedMenu(trigger, doc, available = menus(doc)) {
       (menu.getAttribute('aria-labelledby') || '').split(/\s+/).includes(trigger.id))));
 }
 
-async function waitFor(read, signal, timeout = 800) {
-  const until = Date.now() + timeout;
-  while (!signal?.aborted) {
-    const value = read();
-    if (value) return value;
-    if (Date.now() >= until) break;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  return null;
+function waitFor(read, signal, timeout = 800) {
+  if (signal?.aborted) return Promise.resolve(null);
+  const initial = read();
+  if (initial) return Promise.resolve(initial);
+  return new Promise((resolve, reject) => {
+    let observer, poll, deadline, settled = false;
+    const finish = (value, error) => {
+      if (settled) return;
+      settled = true;
+      observer?.disconnect();
+      clearInterval(poll);
+      clearTimeout(deadline);
+      signal?.removeEventListener('abort', abort);
+      if (error) reject(error); else resolve(value);
+    };
+    const abort = () => finish(null);
+    const check = () => {
+      try {
+        if (signal?.aborted) finish(null);
+        else { const value = read(); if (value) finish(value); }
+      } catch (error) { finish(null, error); }
+    };
+    // React and similar frameworks often mount/unmount after click() returns.
+    // Observe that update immediately, retaining polling for CSS-only changes
+    // and shadow roots attached after observation started.
+    observer = new MutationObserver(check);
+    for (const root of allRoots(document)) {
+      if (root.host?.hasAttribute('data-domseek-panel')) continue;
+      observer.observe(root, { subtree: true, childList: true, attributes: true,
+        attributeFilter: ['role', 'id', 'aria-labelledby', 'aria-controls', 'hidden', 'inert', 'class', 'style'] });
+    }
+    signal?.addEventListener('abort', abort, { once: true });
+    poll = setInterval(check, 25);
+    deadline = setTimeout(() => { check(); finish(null); }, timeout);
+    check();
+  });
 }
 
 function emitEscape(target, type) {
